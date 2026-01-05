@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: stock_service
+
+  # DataSource (PostgreSQL)
+  datasource:
+    url: jdbc:postgresql://localhost:5432/stock_service_db
+    username: postgres
+    password: 1234
+    driver-class-name: org.postgresql.Driver
+
+  # JPA / Hibernate
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: true
+
+  # Kafka
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      client-id: stock-service-consumer
+    topics:
+      stock-reserved: stock.reserved
+      stock-rejected: stock.rejected
+      order-placed: order.placed
+
+# Logging
+logging:
+  level:
+    org.springframework.boot.autoconfigure.jdbc: DEBUG
+
+server:
+  port: 8082
