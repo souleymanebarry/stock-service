@@ -24,6 +24,8 @@ spring:
       stock-reserved: stock.reserved
       stock-rejected: stock.rejected
       order-placed: order.placed
+    properties:
+      schema.registry.url: http://localhost:8081
 
 # Logging
 logging:
