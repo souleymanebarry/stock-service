@@ -1,5 +1,10 @@
 package com.barry.saga.retail.stock_service.service.impl;
 
+import com.barry.saga.retail.order.event.OrderItem;
+import com.barry.saga.retail.order.event.OrderPlacedEvent;
+import com.barry.saga.retail.stock.event.StockItem;
+import com.barry.saga.retail.stock.event.StockRejectedEvent;
+import com.barry.saga.retail.stock.event.StockReservedEvent;
 import com.barry.saga.retail.stock_service.entities.StockItemEntity;
 import com.barry.saga.retail.stock_service.entities.StockReservationEntity;
 import com.barry.saga.retail.stock_service.entities.enums.StockReservationStatus;
@@ -7,10 +12,6 @@ import com.barry.saga.retail.stock_service.kafka.StockEventProducer;
 import com.barry.saga.retail.stock_service.repositories.StockItemRepository;
 import com.barry.saga.retail.stock_service.repositories.StockReservationRepository;
 import com.barry.saga.retail.stock_service.service.StockService;
-import com.barry.saga.retail.stock_service.share.event.OrderPlacedEvent;
-
-import com.barry.saga.retail.stock_service.share.event.StockRejectedEvent;
-import com.barry.saga.retail.stock_service.share.event.StockReservedEvent;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
@@ -18,6 +19,7 @@ import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -53,9 +55,10 @@ public class StockServiceImpl implements StockService {
     @Override
     @Transactional
     public void reservedStock(OrderPlacedEvent orderPlacedEvent) {
-        for (OrderPlacedEvent.Item item : orderPlacedEvent.getItems()) {
-            if (!reserveItem(orderPlacedEvent.getOrderId(), item)) {
-                publishStockRejected(orderPlacedEvent.getOrderId(), item.getSku());
+        UUID orderId = UUID.fromString(orderPlacedEvent.getOrderId());
+        for (OrderItem item : orderPlacedEvent.getItems()) {
+            if (!reserveItem(orderId, item)) {
+                publishStockRejected(orderPlacedEvent, item.getSku());
                 return; //  // ❌ arrêt de la saga
             }
         }
@@ -78,7 +81,7 @@ public class StockServiceImpl implements StockService {
      * @param item item de commande à réserver
      * @return {@code true} si la réservation a réussi, {@code false} sinon
      */
-    private boolean reserveItem(UUID orderId, OrderPlacedEvent.Item item) {
+    private boolean reserveItem(UUID orderId, OrderItem item) {
         String sku = item.getSku();
         Integer requestedQty = item.getQuantity();
 
@@ -144,32 +147,38 @@ public class StockServiceImpl implements StockService {
      * Publie un événement {@code StockRejectedEvent} afin de signaler
      * l’échec de la réservation de stock pour une commande.
      *
-     * @param orderId identifiant de la commande
+     * @param orderPlacedEvent événement de commande à l’origine du rejet
      * @param sku identifiant du produit à l’origine du rejet
      */
-    private void publishStockRejected(UUID orderId, String sku) {
-        stockEventProducer.sendStockRejected(StockRejectedEvent.builder()
-                .orderId(orderId)
-                .reason("Insufficient stock for Sku= {}" + sku)
-                .rejectedAt(LocalDateTime.now())
+    private void publishStockRejected(OrderPlacedEvent orderPlacedEvent, String sku) {
+        stockEventProducer.sendStockRejected(StockRejectedEvent.newBuilder()
+                .setEventId(UUID.randomUUID().toString())
+                .setOrderId(orderPlacedEvent.getOrderId())
+                .setIdempotencyKey(orderPlacedEvent.getIdempotencyKey())
+                .setReason("Insufficient stock for SKU=" + sku)
+                .setRejectedAt(Instant.now())
+                .setVersion("v1")
                 .build());
     }
 
     /**
-     * Publie un "évènement {@code StockReservedEvent } lorsque tous les items d'une
-     * cmd ont été réservés avec succès
+     * Publie un événement {@code StockReservedEvent} lorsque tous les items d'une
+     * commande ont été réservés avec succès.
      *
-     * @param orderPlacedEvent  évènement de commande mes contenant les items réservés
+     * @param orderPlacedEvent événement de commande contenant les items réservés
      */
-    private void  publishStockReserved(OrderPlacedEvent orderPlacedEvent) {
-        stockEventProducer.sendStockReserved(StockReservedEvent.builder()
-                .orderId(orderPlacedEvent.getOrderId())
-                        .reservedAt(LocalDateTime.now())
-                        .items(orderPlacedEvent.getItems().stream()
-                                .map(item -> StockReservedEvent.StockItem.builder()
-                                        .sku(item.getSku())
-                                        .quantity(item.getQuantity())
-                                        .build()).toList())
+    private void publishStockReserved(OrderPlacedEvent orderPlacedEvent) {
+        stockEventProducer.sendStockReserved(StockReservedEvent.newBuilder()
+                .setEventId(UUID.randomUUID().toString())
+                .setOrderId(orderPlacedEvent.getOrderId())
+                .setItems(orderPlacedEvent.getItems().stream()
+                        .map(item -> StockItem.newBuilder()
+                                .setSku(item.getSku())
+                                .setQuantity(item.getQuantity())
+                                .build())
+                        .toList())
+                .setReservedAt(Instant.now())
+                .setVersion("v1")
                 .build());
         log.info("📡 StockReservedEvent publié pour orderId={}", orderPlacedEvent.getOrderId());
     }

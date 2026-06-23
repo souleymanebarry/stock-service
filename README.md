@@ -22,3 +22,7 @@ Il intervient dans le Saga de création de commande pour :
   StockReservedEvent si succès
   StockRejectedEvent si échec
 * Conserve l’historique des réservations (Saga-friendly)
+----------------------------------------------------------------
+**📚 Documentation**
+
+* [Migration JSON → Avro, fonctionnement & points d'attention](docs/MIGRATION_AVRO.md)
