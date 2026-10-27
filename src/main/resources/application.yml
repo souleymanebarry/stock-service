@@ -15,6 +15,11 @@ spring:
       ddl-auto: none
     show-sql: true
 
+  # Liquibase
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    enabled: true
+
   # Kafka
   kafka:
     bootstrap-servers: localhost:9092
