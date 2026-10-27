@@ -21,6 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import static com.barry.saga.retail.stock_service.entities.enums.StockReservationStatus.REJECTED;
@@ -39,16 +42,17 @@ public class StockServiceImpl implements StockService {
      * Traite un événement {@link OrderPlacedEvent} reçu depuis Kafka.
      * <p>
      * Cette méthode implémente la logique de réservation de stock dans le cadre
-     * d’une saga :
+     * d’une saga, en "tout ou rien" :
      * <ul>
-     *     <li>Vérifie la disponibilité du stock pour chaque item</li>
-     *     <li>Réserve les quantités si le stock est suffisant</li>
-     *     <li>Arrête la saga dès qu’un item ne peut pas être réservé</li>
-     *     <li>Publie un événement {@code StockReservedEvent} ou {@code StockRejectedEvent}</li>
+     *     <li>Ignore une commande déjà traitée (livraison Kafka/Debezium "at-least-once")</li>
+     *     <li>Vérifie d'abord la disponibilité de TOUS les items, sans rien modifier</li>
+     *     <li>Au premier item introuvable ou insuffisant : rejet, aucun stock n'est touché</li>
+     *     <li>Sinon réserve toutes les quantités</li>
+     *     <li>Écrit un {@code StockReservedEvent} ou {@code StockRejectedEvent} dans l'outbox</li>
      * </ul>
      *
-     * L’ensemble du traitement est transactionnel :
-     * soit toutes les réservations réussissent, soit aucune n’est validée.
+     * Le stock, l'historique des réservations et l'évènement sont écrits dans la
+     * même transaction : soit tout est validé, soit rien.
      *
      * @param orderPlacedEvent événement de commande contenant les items à réserver
      */
@@ -56,55 +60,59 @@ public class StockServiceImpl implements StockService {
     @Transactional
     public void reservedStock(OrderPlacedEvent orderPlacedEvent) {
         UUID orderId = UUID.fromString(orderPlacedEvent.getOrderId());
+
+        // 0. Idempotence : une commande déjà traitée (réservée OU rejetée) est ignorée
+        if (stockReservationRepository.existsByOrderId(orderId)) {
+            log.info("♻ OrderPlacedEvent already processed for orderId={} — skipping", orderId);
+            return;
+        }
+
+        // 1. Vérification de tous les items AVANT toute écriture
+        Map<String, StockItemEntity> stockBySku = new HashMap<>();
+        Map<String, Integer> requestedBySku = new HashMap<>();
         for (OrderItem item : orderPlacedEvent.getItems()) {
-            if (!reserveItem(orderId, item)) {
-                publishStockRejected(orderPlacedEvent, item.getSku());
-                return; //  // ❌ arrêt de la saga
+            String sku = item.getSku();
+
+            Optional<StockItemEntity> stockItem = stockItemRepository.findBySku(sku);
+            if (stockItem.isEmpty()) {
+                log.warn("❌ No stock for SKU={}", sku);
+                reject(orderPlacedEvent, item, "Unknown SKU=" + sku);
+                return; // ❌ arrêt de la saga
             }
+            stockBySku.put(sku, stockItem.get());
+
+            // Une même commande peut contenir plusieurs lignes du même SKU
+            int requestedQty = requestedBySku.merge(sku, item.getQuantity(), Integer::sum);
+            int availableQty = stockItem.get().getAvailableQuantity();
+            if (availableQty < requestedQty) {
+                log.warn("Not enough stock for SKU= {}, (requestedQty= {}, available= {})",
+                        sku, requestedQty, availableQty);
+                reject(orderPlacedEvent, item, "Insufficient stock for SKU=" + sku);
+                return; // ❌ arrêt de la saga
+            }
+        }
+
+        // 2. Tout est disponible : réservation de chaque item
+        for (OrderItem item : orderPlacedEvent.getItems()) {
+            updateStock(stockBySku.get(item.getSku()), item.getQuantity());
+            saveReservation(orderId, item.getSku(), item.getQuantity(), RESERVED);
+            log.info("✅ Stock reserved for SKU={} | qty={}", item.getSku(), item.getQuantity());
         }
 
         publishStockReserved(orderPlacedEvent);
     }
 
     /**
-     * Tente de réserver le stock pour un item de commande donné.
-     * <p>
-     * Étapes :
-     * <ul>
-     *     <li>Récupération du stock pour le SKU</li>
-     *     <li>Vérification de la quantité disponible</li>
-     *     <li>Mise à jour des quantités disponibles et réservées</li>
-     *     <li>Enregistrement de l’historique de réservation</li>
-     * </ul>
+     * Rejette la commande : trace le rejet (qui sert aussi de marqueur d'idempotence)
+     * et écrit un {@code StockRejectedEvent} dans l'outbox. Aucun stock n'est modifié.
      *
-     * @param orderId identifiant de la commande
-     * @param item item de commande à réserver
-     * @return {@code true} si la réservation a réussi, {@code false} sinon
+     * @param orderPlacedEvent événement de commande à l’origine du rejet
+     * @param item item de commande à l’origine du rejet
+     * @param reason motif du rejet transmis à orders-service
      */
-    private boolean reserveItem(UUID orderId, OrderItem item) {
-        String sku = item.getSku();
-        Integer requestedQty = item.getQuantity();
-
-        final StockItemEntity stockItem = findStockItem(sku);
-
-        if (stockItem.getAvailableQuantity() < requestedQty) {
-            log.warn("Not enough stock for SKU= {}, (requestedQty= {}, available= {})",
-                    sku, requestedQty, stockItem.getAvailableQuantity());
-            saveReservation(orderId,sku,requestedQty,REJECTED);
-            return false;
-        }
-        updateStock(stockItem,requestedQty);
-        log.info("✅ Stock reserved for SKU={} | qty={}", sku, requestedQty);
-        saveReservation(orderId, sku, requestedQty, RESERVED);
-        return true;
-    }
-
-    private StockItemEntity findStockItem(String sku) {
-        return stockItemRepository.findBySku(sku)
-                .orElseThrow(() -> {
-                    log.error("❌ No stock for SKU={}", sku);
-                    return new IllegalArgumentException("Stock not found for SKU={}" + sku);
-                });
+    private void reject(OrderPlacedEvent orderPlacedEvent, OrderItem item, String reason) {
+        saveReservation(UUID.fromString(orderPlacedEvent.getOrderId()), item.getSku(), item.getQuantity(), REJECTED);
+        publishStockRejected(orderPlacedEvent, reason);
     }
 
     /**
@@ -144,26 +152,26 @@ public class StockServiceImpl implements StockService {
     }
 
     /**
-     * Publie un événement {@code StockRejectedEvent} afin de signaler
+     * Écrit un événement {@code StockRejectedEvent} dans l'outbox afin de signaler
      * l’échec de la réservation de stock pour une commande.
      *
      * @param orderPlacedEvent événement de commande à l’origine du rejet
-     * @param sku identifiant du produit à l’origine du rejet
+     * @param reason motif du rejet
      */
-    private void publishStockRejected(OrderPlacedEvent orderPlacedEvent, String sku) {
+    private void publishStockRejected(OrderPlacedEvent orderPlacedEvent, String reason) {
         stockEventPublisher.publishStockRejected(StockRejectedEvent.newBuilder()
                 .setEventId(UUID.randomUUID().toString())
                 .setOrderId(orderPlacedEvent.getOrderId())
                 .setIdempotencyKey(orderPlacedEvent.getIdempotencyKey())
-                .setReason("Insufficient stock for SKU=" + sku)
+                .setReason(reason)
                 .setRejectedAt(Instant.now())
                 .setVersion("v1")
                 .build());
     }
 
     /**
-     * Publie un événement {@code StockReservedEvent} lorsque tous les items d'une
-     * commande ont été réservés avec succès.
+     * Écrit un événement {@code StockReservedEvent} dans l'outbox lorsque tous les
+     * items d'une commande ont été réservés avec succès.
      *
      * @param orderPlacedEvent événement de commande contenant les items réservés
      */
@@ -180,7 +188,7 @@ public class StockServiceImpl implements StockService {
                 .setReservedAt(Instant.now())
                 .setVersion("v1")
                 .build());
-        log.info("📡 StockReservedEvent publié pour orderId={}", orderPlacedEvent.getOrderId());
+        log.info("📡 StockReservedEvent écrit dans l'outbox pour orderId={}", orderPlacedEvent.getOrderId());
     }
 
 }
