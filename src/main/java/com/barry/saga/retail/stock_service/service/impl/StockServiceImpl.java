@@ -8,7 +8,7 @@ import com.barry.saga.retail.stock.event.StockReservedEvent;
 import com.barry.saga.retail.stock_service.entities.StockItemEntity;
 import com.barry.saga.retail.stock_service.entities.StockReservationEntity;
 import com.barry.saga.retail.stock_service.entities.enums.StockReservationStatus;
-import com.barry.saga.retail.stock_service.kafka.StockEventProducer;
+import com.barry.saga.retail.stock_service.outbox.StockEventPublisher;
 import com.barry.saga.retail.stock_service.repositories.StockItemRepository;
 import com.barry.saga.retail.stock_service.repositories.StockReservationRepository;
 import com.barry.saga.retail.stock_service.service.StockService;
@@ -33,7 +33,7 @@ public class StockServiceImpl implements StockService {
 
     private final StockItemRepository stockItemRepository;
     private final StockReservationRepository stockReservationRepository;
-    private final StockEventProducer stockEventProducer;
+    private final StockEventPublisher stockEventPublisher;
 
     /**
      * Traite un événement {@link OrderPlacedEvent} reçu depuis Kafka.
@@ -151,7 +151,7 @@ public class StockServiceImpl implements StockService {
      * @param sku identifiant du produit à l’origine du rejet
      */
     private void publishStockRejected(OrderPlacedEvent orderPlacedEvent, String sku) {
-        stockEventProducer.sendStockRejected(StockRejectedEvent.newBuilder()
+        stockEventPublisher.publishStockRejected(StockRejectedEvent.newBuilder()
                 .setEventId(UUID.randomUUID().toString())
                 .setOrderId(orderPlacedEvent.getOrderId())
                 .setIdempotencyKey(orderPlacedEvent.getIdempotencyKey())
@@ -168,7 +168,7 @@ public class StockServiceImpl implements StockService {
      * @param orderPlacedEvent événement de commande contenant les items réservés
      */
     private void publishStockReserved(OrderPlacedEvent orderPlacedEvent) {
-        stockEventProducer.sendStockReserved(StockReservedEvent.newBuilder()
+        stockEventPublisher.publishStockReserved(StockReservedEvent.newBuilder()
                 .setEventId(UUID.randomUUID().toString())
                 .setOrderId(orderPlacedEvent.getOrderId())
                 .setItems(orderPlacedEvent.getItems().stream()
