@@ -8,5 +8,9 @@ databaseChangeLog:
       relativeToChangelogFile: true
 
   - include:
+      file: DDL/003-create-outbox-event-table.sql
+      relativeToChangelogFile: true
+
+  - include:
       file: DML/001-insert-stock-items.sql
       relativeToChangelogFile: true
