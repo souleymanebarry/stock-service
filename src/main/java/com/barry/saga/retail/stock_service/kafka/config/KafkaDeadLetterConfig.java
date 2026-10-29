@@ -22,6 +22,7 @@ import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.listener.RetryListener;
 import org.springframework.kafka.support.ExponentialBackOffWithMaxRetries;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -40,7 +41,8 @@ import static com.barry.saga.retail.stock_service.kafka.config.KafkaTopicsConfig
  *     <li>Message Avro lisible : ré-sérialisé en Avro</li>
  * </ul>
  * Spring ajoute les headers {@code kafka_dlt-original-topic/partition/offset} et
- * {@code kafka_dlt-exception-fqcn/message/stacktrace} pour le diagnostic et le rejeu.
+ * {@code kafka_dlt-exception-fqcn/message/stacktrace} pour le diagnostic et le rejeu,
+ * et on y ajoute {@value #DELIVERY_ATTEMPTS_HEADER} (nombre de tentatives).
  * <p>
  * La DLT est une affaire d'infrastructure : elle est publiée directement sur Kafka,
  * pas via l'outbox (aucun état métier à garder cohérent avec la base).
@@ -50,6 +52,9 @@ import static com.barry.saga.retail.stock_service.kafka.config.KafkaTopicsConfig
 public class KafkaDeadLetterConfig {
 
     static final int MAX_RETRIES = 3;
+
+    /** Nombre de tentatives avant l'envoi en DLT, en texte pour être lisible dans Conduktor. */
+    public static final String DELIVERY_ATTEMPTS_HEADER = "dlt-delivery-attempts";
     private static final long INITIAL_INTERVAL_MS = 1_000L;
     private static final double MULTIPLIER = 2.0;
     private static final long MAX_INTERVAL_MS = 10_000L;
@@ -118,6 +123,10 @@ public class KafkaDeadLetterConfig {
         return new RetryListener() {
             @Override
             public void failedDelivery(ConsumerRecord<?, ?> record, Exception ex, int deliveryAttempt) {
+                // Appelé avant la publication en DLT, sur le même record : le recoverer recopie le header
+                record.headers().remove(DELIVERY_ATTEMPTS_HEADER);
+                record.headers().add(DELIVERY_ATTEMPTS_HEADER,
+                        String.valueOf(deliveryAttempt).getBytes(StandardCharsets.UTF_8));
                 log.warn("⚠ Kafka delivery failed | topic={} | partition={} | offset={} | attempt={}/{} | error={}",
                         record.topic(), record.partition(), record.offset(),
                         deliveryAttempt, MAX_RETRIES + 1, ex.getMessage());
