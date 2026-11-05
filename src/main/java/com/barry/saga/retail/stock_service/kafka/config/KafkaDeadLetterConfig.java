@@ -1,7 +1,7 @@
 package com.barry.saga.retail.stock_service.kafka.config;
 
-import io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig;
 import io.confluent.kafka.serializers.KafkaAvroSerializer;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 
 import org.apache.avro.specific.SpecificRecord;
@@ -11,7 +11,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
@@ -49,6 +49,7 @@ import static com.barry.saga.retail.stock_service.kafka.config.KafkaTopicsConfig
  */
 @Configuration
 @Log4j2
+@RequiredArgsConstructor
 public class KafkaDeadLetterConfig {
 
     static final int MAX_RETRIES = 3;
@@ -59,11 +60,7 @@ public class KafkaDeadLetterConfig {
     private static final double MULTIPLIER = 2.0;
     private static final long MAX_INTERVAL_MS = 10_000L;
 
-    @Value("${spring.kafka.bootstrap-servers}")
-    private String bootstrapServers;
-
-    @Value("${spring.kafka.properties.schema.registry.url}")
-    private String schemaRegistry;
+    private final KafkaProperties kafkaProperties;
 
     @Bean
     public DefaultErrorHandler kafkaErrorHandler() {
@@ -105,13 +102,15 @@ public class KafkaDeadLetterConfig {
     public KafkaTemplate<String, SpecificRecord> avroDltTemplate() {
         Map<String, Object> props = dltProducerProps();
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class);
-        props.put(AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG, schemaRegistry);
         return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(props));
     }
 
+    /**
+     * Base = configuration Spring Boot ({@code spring.kafka.*}) : bootstrap-servers et
+     * {@code spring.kafka.properties.*} (dont schema.registry.url).
+     */
     private Map<String, Object> dltProducerProps() {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        Map<String, Object> props = new HashMap<>(kafkaProperties.buildProducerProperties());
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         // Un message envoyé en DLT ne doit pas être perdu : ack de tous les réplicas
         props.put(ProducerConfig.ACKS_CONFIG, "all");
