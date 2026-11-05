@@ -25,6 +25,7 @@ spring:
     bootstrap-servers: localhost:9092
     consumer:
       client-id: stock-service-consumer
+      group-id: stock-service-group
     topics:
       stock-reserved: stock.reserved
       stock-rejected: stock.rejected

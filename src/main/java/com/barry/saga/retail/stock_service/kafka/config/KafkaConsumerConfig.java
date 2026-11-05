@@ -32,15 +32,13 @@ public class KafkaConsumerConfig {
      * Le type concret de l'événement est résolu via le Schema Registry
      * (specific.avro.reader=true → classes Avro générées).
      * <p>
-     * Base = configuration Spring Boot ({@code spring.kafka.*}) : bootstrap-servers et
+     * Base = configuration Spring Boot ({@code spring.kafka.*}) : bootstrap-servers,
+     * identité Kafka ({@code spring.kafka.consumer.client-id/group-id}) et
      * {@code spring.kafka.properties.*} (dont schema.registry.url), puis les réglages
      * propres à ce consommateur.
      */
     public Map<String, Object> consumerProps() {
         Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties());
-
-        // 🔑 Identité Kafka
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "stock-service-group");
 
         // 🔐 Offsets contrôlés par le métier (saga)
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
