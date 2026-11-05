@@ -79,6 +79,7 @@ class KafkaDeadLetterConfigTest {
     private final EmbeddedKafkaBroker broker;
     private final AtomicInteger deliveries = new AtomicInteger();
     private ConcurrentMessageListenerContainer<String, SpecificRecord> container;
+    private KafkaDeadLetterConfig deadLetterConfig;
 
     KafkaDeadLetterConfigTest(EmbeddedKafkaBroker broker) {
         this.broker = broker;
@@ -99,10 +100,14 @@ class KafkaDeadLetterConfigTest {
         deliveries.set(0);
     }
 
+    /** Container d'abord (plus aucun envoi en DLT), puis fermeture des producteurs DLT, comme à l'arrêt de Spring. */
     @AfterEach
-    void stopContainer() {
+    void stopListener() {
         if (container != null) {
             container.stop();
+        }
+        if (deadLetterConfig != null) {
+            deadLetterConfig.destroy();
         }
     }
 
@@ -195,7 +200,7 @@ class KafkaDeadLetterConfigTest {
         kafkaProperties.getProducer().getProperties().putAll(producerOverrides);
 
         KafkaConsumerConfig consumerConfig = new KafkaConsumerConfig(kafkaProperties);
-        KafkaDeadLetterConfig deadLetterConfig = new KafkaDeadLetterConfig(kafkaProperties);
+        deadLetterConfig = new KafkaDeadLetterConfig(kafkaProperties);
 
         container = consumerConfig
                 .kafkaListenerContainerFactory(deadLetterConfig.kafkaErrorHandler())
