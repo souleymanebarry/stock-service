@@ -24,6 +24,7 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.awaitility.core.ConditionFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,13 +60,18 @@ import static org.awaitility.Awaitility.await;
 @EmbeddedKafka(partitions = 3, topics = {
         KafkaDeadLetterConfigTest.RETRYABLE_TOPIC,
         KafkaDeadLetterConfigTest.NOT_RETRYABLE_TOPIC,
-        KafkaDeadLetterConfigTest.POISON_PILL_TOPIC
+        KafkaDeadLetterConfigTest.POISON_PILL_TOPIC,
+        KafkaDeadLetterConfigTest.DLT_FAILURE_TOPIC
 })
 class KafkaDeadLetterConfigTest {
 
     static final String RETRYABLE_TOPIC = "dlt-test.retryable";
     static final String NOT_RETRYABLE_TOPIC = "dlt-test.not-retryable";
     static final String POISON_PILL_TOPIC = "dlt-test.poison-pill";
+    static final String DLT_FAILURE_TOPIC = "dlt-test.dlt-failure";
+
+    /** Schema Registry injoignable (port 1) : toute sérialisation Avro vers la DLT échoue. */
+    private static final String UNREACHABLE_SCHEMA_REGISTRY = "http://localhost:1";
 
     private static final String SCHEMA_REGISTRY = "mock://dlt-test";
     private static final String GROUP_ID = "stock-service-group";
@@ -84,7 +90,8 @@ class KafkaDeadLetterConfigTest {
         broker.addTopics(
                 new NewTopic(RETRYABLE_TOPIC + ".dlt", 1, (short) 1),
                 new NewTopic(NOT_RETRYABLE_TOPIC + ".dlt", 1, (short) 1),
-                new NewTopic(POISON_PILL_TOPIC + ".dlt", 1, (short) 1));
+                new NewTopic(POISON_PILL_TOPIC + ".dlt", 1, (short) 1),
+                new NewTopic(DLT_FAILURE_TOPIC + ".dlt", 1, (short) 1));
     }
 
     @BeforeEach
@@ -107,10 +114,10 @@ class KafkaDeadLetterConfigTest {
         });
         OrderPlacedEvent event = orderPlacedEvent();
 
-        send(RETRYABLE_TOPIC, event.getOrderId().toString(), event, new KafkaAvroSerializer());
+        send(RETRYABLE_TOPIC, event.getOrderId(), event, new KafkaAvroSerializer());
 
         ConsumerRecord<String, Object> dlt = consumeDlt(RETRYABLE_TOPIC, avroDeserializerProps());
-        assertThat(dlt.key()).isEqualTo(event.getOrderId().toString());
+        assertThat(dlt.key()).isEqualTo(event.getOrderId());
         assertThat(dlt.value()).isEqualTo(event);
         assertThat(header(dlt, KafkaHeaders.DLT_ORIGINAL_TOPIC)).isEqualTo(RETRYABLE_TOPIC);
         assertThat(header(dlt, KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN)).isEqualTo(IllegalStateException.class.getName());
@@ -128,7 +135,7 @@ class KafkaDeadLetterConfigTest {
         });
         OrderPlacedEvent event = orderPlacedEvent();
 
-        send(NOT_RETRYABLE_TOPIC, event.getOrderId().toString(), event, new KafkaAvroSerializer());
+        send(NOT_RETRYABLE_TOPIC, event.getOrderId(), event, new KafkaAvroSerializer());
 
         ConsumerRecord<String, Object> dlt = consumeDlt(NOT_RETRYABLE_TOPIC, avroDeserializerProps());
         assertThat(dlt.value()).isEqualTo(event);
@@ -154,14 +161,37 @@ class KafkaDeadLetterConfigTest {
         assertOffsetCommitted(POISON_PILL_TOPIC);
     }
 
+    @Test
+    @DisplayName("Échec de publication en DLT : offset non commité, message relivré")
+    void dltPublicationFailure_recordIsNotCommittedAndRedelivered() {
+        // Seul le producteur DLT voit le registry injoignable ; le consumer garde le mock
+        startListener(DLT_FAILURE_TOPIC, () -> {
+            throw new IllegalArgumentException("Invalid UUID string: abc");
+        }, Map.of(AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG, UNREACHABLE_SCHEMA_REGISTRY));
+        OrderPlacedEvent event = orderPlacedEvent();
+
+        send(DLT_FAILURE_TOPIC, event.getOrderId(), event, new KafkaAvroSerializer());
+
+        // Non rejouable => 1 seule livraison si la DLT réussissait : une 2e prouve l'échec de recovery + seek
+        await().atMost(Duration.ofSeconds(30))
+                .untilAsserted(() -> assertThat(deliveries.get()).isGreaterThan(1));
+        assertNoOffsetCommitted(DLT_FAILURE_TOPIC);
+    }
+
     // ----------------------------------------------------------------------
 
     /** Démarre un listener câblé exactement comme en production (factory + error handler). */
     private void startListener(String topic, Runnable behaviour) {
+        startListener(topic, behaviour, Map.of());
+    }
+
+    /** {@code producerOverrides} : équivalent de spring.kafka.producer.properties.* (prime sur spring.kafka.properties.*). */
+    private void startListener(String topic, Runnable behaviour, Map<String, String> producerOverrides) {
         // Équivalent de spring.kafka.bootstrap-servers + spring.kafka.properties.schema.registry.url
         KafkaProperties kafkaProperties = new KafkaProperties();
         kafkaProperties.setBootstrapServers(List.of(broker.getBrokersAsString()));
         kafkaProperties.getProperties().put(AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG, SCHEMA_REGISTRY);
+        kafkaProperties.getProducer().getProperties().putAll(producerOverrides);
 
         KafkaConsumerConfig consumerConfig = new KafkaConsumerConfig(kafkaProperties);
         KafkaDeadLetterConfig deadLetterConfig = new KafkaDeadLetterConfig(kafkaProperties);
@@ -169,7 +199,7 @@ class KafkaDeadLetterConfigTest {
         container = consumerConfig
                 .kafkaListenerContainerFactory(deadLetterConfig.kafkaErrorHandler())
                 .createContainer(topic);
-        container.setupMessageListener((AcknowledgingMessageListener<String, SpecificRecord>) (record, ack) -> {
+        container.setupMessageListener((AcknowledgingMessageListener<String, SpecificRecord>) (consumerRecord, ack) -> {
             deliveries.incrementAndGet();
             behaviour.run();
             ack.acknowledge();
@@ -205,22 +235,31 @@ class KafkaDeadLetterConfigTest {
 
     /** L'offset du message en échec doit être commité : la partition n'est plus bloquée. */
     private void assertOffsetCommitted(String topic) {
+        assertCommittedOffset(topic, 1L, await().atMost(Duration.ofSeconds(15)));
+    }
+
+    /** Tant que la DLT échoue, l'offset ne doit pas avancer (pendant 2s) : le message n'est pas perdu. */
+    private void assertNoOffsetCommitted(String topic) {
+        assertCommittedOffset(topic, 0L, await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)));
+    }
+
+    private void assertCommittedOffset(String topic, long expected, ConditionFactory condition) {
         try (AdminClient admin = AdminClient.create(
                 Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBrokersAsString()))) {
-            await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            condition.untilAsserted(() -> {
                 Map<TopicPartition, OffsetAndMetadata> offsets = admin
                         .listConsumerGroupOffsets(GROUP_ID).partitionsToOffsetAndMetadata().get();
                 long committed = offsets.entrySet().stream()
                         .filter(e -> e.getKey().topic().equals(topic) && e.getValue() != null)
                         .mapToLong(e -> e.getValue().offset())
                         .sum();
-                assertThat(committed).isEqualTo(1L);
+                assertThat(committed).isEqualTo(expected);
             });
         }
     }
 
-    private static String header(ConsumerRecord<?, ?> record, String name) {
-        Header header = record.headers().lastHeader(name);
+    private static String header(ConsumerRecord<?, ?> consumerRecord, String name) {
+        Header header = consumerRecord.headers().lastHeader(name);
         return header == null ? null : new String(header.value(), StandardCharsets.UTF_8);
     }
 
