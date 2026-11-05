@@ -187,9 +187,10 @@ class KafkaDeadLetterConfigTest {
 
     /** {@code producerOverrides} : équivalent de spring.kafka.producer.properties.* (prime sur spring.kafka.properties.*). */
     private void startListener(String topic, Runnable behaviour, Map<String, String> producerOverrides) {
-        // Équivalent de spring.kafka.bootstrap-servers + spring.kafka.properties.schema.registry.url
+        // Équivalent de spring.kafka.bootstrap-servers + consumer.group-id + properties.schema.registry.url
         KafkaProperties kafkaProperties = new KafkaProperties();
         kafkaProperties.setBootstrapServers(List.of(broker.getBrokersAsString()));
+        kafkaProperties.getConsumer().setGroupId(GROUP_ID);
         kafkaProperties.getProperties().put(AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG, SCHEMA_REGISTRY);
         kafkaProperties.getProducer().getProperties().putAll(producerOverrides);
 
