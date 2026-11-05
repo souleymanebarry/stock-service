@@ -72,7 +72,7 @@ public class KafkaDeadLetterConfig {
         DefaultErrorHandler errorHandler = new DefaultErrorHandler(deadLetterPublishingRecoverer(), backOff);
         // Données invalides (ex. orderId non UUID) : rejouer ne changerait rien
         errorHandler.addNotRetryableExceptions(IllegalArgumentException.class);
-        errorHandler.setRetryListeners(loggingRetryListener());
+        errorHandler.setRetryListeners(new LoggingRetryListener());
         return errorHandler;
     }
 
@@ -118,30 +118,31 @@ public class KafkaDeadLetterConfig {
         return props;
     }
 
-    private RetryListener loggingRetryListener() {
-        return new RetryListener() {
-            @Override
-            public void failedDelivery(ConsumerRecord<?, ?> record, Exception ex, int deliveryAttempt) {
-                // Appelé avant la publication en DLT, sur le même record : le recoverer recopie le header
-                record.headers().remove(DELIVERY_ATTEMPTS_HEADER);
-                record.headers().add(DELIVERY_ATTEMPTS_HEADER,
-                        String.valueOf(deliveryAttempt).getBytes(StandardCharsets.UTF_8));
-                log.warn("⚠ Kafka delivery failed | topic={} | partition={} | offset={} | attempt={}/{} | error={}",
-                        record.topic(), record.partition(), record.offset(),
-                        deliveryAttempt, MAX_RETRIES + 1, ex.getMessage());
-            }
+    /** Trace chaque échec, ajoute le header du nombre de tentatives, et logue l'issue de la DLT. */
+    private static final class LoggingRetryListener implements RetryListener {
 
-            @Override
-            public void recovered(ConsumerRecord<?, ?> record, Exception ex) {
-                log.error("☠ Message sent to DLT {}{} | source: topic={} | partition={} | offset={} | key={}",
-                        record.topic(), DLT_SUFFIX, record.topic(), record.partition(), record.offset(), record.key(), ex);
-            }
+        @Override
+        public void failedDelivery(ConsumerRecord<?, ?> consumerRecord, Exception ex, int deliveryAttempt) {
+            // Appelé avant la publication en DLT, sur le même record : le recoverer recopie le header
+            consumerRecord.headers().remove(DELIVERY_ATTEMPTS_HEADER);
+            consumerRecord.headers().add(DELIVERY_ATTEMPTS_HEADER,
+                    String.valueOf(deliveryAttempt).getBytes(StandardCharsets.UTF_8));
+            log.warn("⚠ Kafka delivery failed | topic={} | partition={} | offset={} | attempt={}/{} | error={}",
+                    consumerRecord.topic(), consumerRecord.partition(), consumerRecord.offset(),
+                    deliveryAttempt, MAX_RETRIES + 1, ex.getMessage());
+        }
 
-            @Override
-            public void recoveryFailed(ConsumerRecord<?, ?> record, Exception original, Exception failure) {
-                log.error("❌ DLT publication failed, record will be retried | topic={} | partition={} | offset={}",
-                        record.topic(), record.partition(), record.offset(), failure);
-            }
-        };
+        @Override
+        public void recovered(ConsumerRecord<?, ?> consumerRecord, Exception ex) {
+            log.error("☠ Message sent to DLT {}{} | source: topic={} | partition={} | offset={} | key={}",
+                    consumerRecord.topic(), DLT_SUFFIX, consumerRecord.topic(), consumerRecord.partition(),
+                    consumerRecord.offset(), consumerRecord.key(), ex);
+        }
+
+        @Override
+        public void recoveryFailed(ConsumerRecord<?, ?> consumerRecord, Exception original, Exception failure) {
+            log.error("❌ DLT publication failed, record will be retried | topic={} | partition={} | offset={}",
+                    consumerRecord.topic(), consumerRecord.partition(), consumerRecord.offset(), failure);
+        }
     }
 }
