@@ -47,6 +47,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -180,7 +181,9 @@ class KafkaDeadLetterConfigTest {
         // Non rejouable => 1 seule livraison si la DLT réussissait : une 2e prouve l'échec de recovery + seek
         await().atMost(Duration.ofSeconds(30))
                 .untilAsserted(() -> assertThat(deliveries.get()).isGreaterThan(1));
-        assertNoOffsetCommitted(DLT_FAILURE_TOPIC);
+        // Tant que la DLT échoue, l'offset ne doit pas avancer (pendant 2s) : le message n'est pas perdu
+        assertCommittedOffset(DLT_FAILURE_TOPIC, 0L,
+                await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)));
     }
 
     // ----------------------------------------------------------------------
@@ -208,7 +211,8 @@ class KafkaDeadLetterConfigTest {
         container.setupMessageListener((AcknowledgingMessageListener<String, SpecificRecord>) (consumerRecord, ack) -> {
             deliveries.incrementAndGet();
             behaviour.run();
-            ack.acknowledge();
+            // @Nullable dans l'API, mais toujours fourni en AckMode.MANUAL (cf. KafkaConsumerConfig)
+            Objects.requireNonNull(ack, "Acknowledgment attendu en AckMode.MANUAL").acknowledge();
         });
         container.start();
     }
@@ -242,11 +246,6 @@ class KafkaDeadLetterConfigTest {
     /** L'offset du message en échec doit être commité : la partition n'est plus bloquée. */
     private void assertOffsetCommitted(String topic) {
         assertCommittedOffset(topic, 1L, await().atMost(Duration.ofSeconds(15)));
-    }
-
-    /** Tant que la DLT échoue, l'offset ne doit pas avancer (pendant 2s) : le message n'est pas perdu. */
-    private void assertNoOffsetCommitted(String topic) {
-        assertCommittedOffset(topic, 0L, await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)));
     }
 
     private void assertCommittedOffset(String topic, long expected, ConditionFactory condition) {
